@@ -5,10 +5,14 @@
 (define-constant err-invalid-reward (err u103))
 (define-constant err-loot-box-not-available (err u104))
 (define-constant err-reward-not-owned (err u105))
+(define-constant err-insufficient-burn-points (err u106))
+(define-constant err-invalid-burn-quantity (err u107))
+(define-constant err-zero-quantity (err u108))
 
 (define-data-var loot-box-counter uint u0)
 (define-data-var reward-counter uint u0)
 (define-data-var total-boxes-opened uint u0)
+(define-data-var total-rewards-burned uint u0)
 
 (define-map loot-boxes
   { loot-box-id: uint }
@@ -50,6 +54,16 @@
   { quantity: uint }
 )
 
+(define-map player-burn-points
+  { player: principal }
+  { points: uint }
+)
+
+(define-map burn-rates
+  { rarity: uint }
+  { points: uint }
+)
+
 (define-read-only (get-loot-box (loot-box-id uint))
   (map-get? loot-boxes { loot-box-id: loot-box-id })
 )
@@ -82,6 +96,24 @@
 
 (define-read-only (get-reward-counter)
   (var-get reward-counter)
+)
+
+(define-read-only (get-player-burn-points (player principal))
+  (default-to
+    { points: u0 }
+    (map-get? player-burn-points { player: player })
+  )
+)
+
+(define-read-only (get-burn-rate (rarity uint))
+  (default-to
+    { points: u0 }
+    (map-get? burn-rates { rarity: rarity })
+  )
+)
+
+(define-read-only (get-total-rewards-burned)
+  (var-get total-rewards-burned)
 )
 
 (define-private (generate-pseudo-random (player principal) (nonce uint))
@@ -385,7 +417,7 @@
 
 (define-public (batch-open-loot-boxes (loot-box-id uint) (quantity uint))
   (begin
-    (asserts! (<= quantity u10) (err u106))
+    (asserts! (<= quantity u10) (err u109))
     (ok (fold batch-open-helper (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) { loot-box-id: loot-box-id, remaining: quantity, results: (list) }))
   )
 )
@@ -434,6 +466,105 @@
     (try! (create-reward "Epic Armor" u3 u2 u400))
     (try! (create-reward "Legendary Gem" u2 u2 u90))
     (try! (create-reward "Mythic Crown" u1 u3 u10))
+    (try! (set-burn-rate u1 u100))
+    (try! (set-burn-rate u2 u50))
+    (try! (set-burn-rate u3 u25))
+    (try! (set-burn-rate u4 u10))
+    (try! (set-burn-rate u5 u5))
     (ok true)
+  )
+)
+
+(define-public (set-burn-rate (rarity uint) (points uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (map-set burn-rates
+      { rarity: rarity }
+      { points: points }
+    )
+    (ok true)
+  )
+)
+
+(define-public (burn-reward (reward-id uint) (quantity uint))
+  (let
+    (
+      (reward-data (unwrap! (get-reward reward-id) err-invalid-reward))
+      (current-inventory (get-player-inventory tx-sender reward-id))
+      (current-quantity (get quantity current-inventory))
+      (burn-rate-data (get-burn-rate (get rarity reward-data)))
+      (points-per-item (get points burn-rate-data))
+      (total-burn-points (* points-per-item quantity))
+      (current-burn-points (get-player-burn-points tx-sender))
+      (current-points (get points current-burn-points))
+    )
+    (asserts! (> quantity u0) err-zero-quantity)
+    (asserts! (>= current-quantity quantity) err-reward-not-owned)
+    (asserts! (> points-per-item u0) err-invalid-burn-quantity)
+    (map-set player-inventory
+      { player: tx-sender, reward-id: reward-id }
+      { quantity: (- current-quantity quantity) }
+    )
+    (map-set player-burn-points
+      { player: tx-sender }
+      { points: (+ current-points total-burn-points) }
+    )
+    (var-set total-rewards-burned (+ (var-get total-rewards-burned) quantity))
+    (ok { burned-quantity: quantity, points-earned: total-burn-points })
+  )
+)
+
+(define-public (spend-burn-points-on-loot-box (loot-box-id uint) (points-to-spend uint))
+  (let
+    (
+      (loot-box-data (unwrap! (get-loot-box loot-box-id) err-invalid-loot-box))
+      (current-burn-points (get-player-burn-points tx-sender))
+      (current-points (get points current-burn-points))
+      (box-price (get price loot-box-data))
+      (required-points (/ box-price u1000))
+    )
+    (asserts! (get available loot-box-data) err-loot-box-not-available)
+    (asserts! (> (get current-supply loot-box-data) u0) err-loot-box-not-available)
+    (asserts! (>= points-to-spend required-points) err-insufficient-burn-points)
+    (asserts! (>= current-points points-to-spend) err-insufficient-burn-points)
+    (map-set player-burn-points
+      { player: tx-sender }
+      { points: (- current-points points-to-spend) }
+    )
+    (map-set loot-boxes
+      { loot-box-id: loot-box-id }
+      (merge loot-box-data { current-supply: (- (get current-supply loot-box-data) u1) })
+    )
+    (let
+      (
+        (current-purchases (default-to u0 (get quantity (map-get? loot-box-purchases { player: tx-sender, loot-box-id: loot-box-id }))))
+      )
+      (map-set loot-box-purchases
+        { player: tx-sender, loot-box-id: loot-box-id }
+        { quantity: (+ current-purchases u1) }
+      )
+    )
+    (ok { points-spent: points-to-spend, loot-box-acquired: true })
+  )
+)
+
+(define-read-only (calculate-burn-points (reward-id uint) (quantity uint))
+  (let
+    (
+      (reward-data (unwrap! (get-reward reward-id) err-invalid-reward))
+      (burn-rate-data (get-burn-rate (get rarity reward-data)))
+      (points-per-item (get points burn-rate-data))
+    )
+    (ok (* points-per-item quantity))
+  )
+)
+
+(define-read-only (calculate-loot-box-cost-in-points (loot-box-id uint))
+  (let
+    (
+      (loot-box-data (unwrap! (get-loot-box loot-box-id) err-invalid-loot-box))
+      (box-price (get price loot-box-data))
+    )
+    (ok (/ box-price u1000))
   )
 )
