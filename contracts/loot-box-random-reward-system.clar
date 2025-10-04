@@ -8,11 +8,15 @@
 (define-constant err-insufficient-burn-points (err u106))
 (define-constant err-invalid-burn-quantity (err u107))
 (define-constant err-zero-quantity (err u108))
+(define-constant err-invalid-fusion-recipe (err u110))
+(define-constant err-insufficient-boxes-for-fusion (err u111))
+(define-constant err-fusion-not-enabled (err u112))
 
 (define-data-var loot-box-counter uint u0)
 (define-data-var reward-counter uint u0)
 (define-data-var total-boxes-opened uint u0)
 (define-data-var total-rewards-burned uint u0)
+(define-data-var total-fusions-completed uint u0)
 
 (define-map loot-boxes
   { loot-box-id: uint }
@@ -62,6 +66,23 @@
 (define-map burn-rates
   { rarity: uint }
   { points: uint }
+)
+
+(define-map fusion-recipes
+  { source-loot-box-id: uint }
+  {
+    target-loot-box-id: uint,
+    required-quantity: uint,
+    enabled: bool
+  }
+)
+
+(define-map player-fusion-stats
+  { player: principal }
+  {
+    total-fusions: uint,
+    boxes-fused: uint
+  }
 )
 
 (define-read-only (get-loot-box (loot-box-id uint))
@@ -114,6 +135,21 @@
 
 (define-read-only (get-total-rewards-burned)
   (var-get total-rewards-burned)
+)
+
+(define-read-only (get-fusion-recipe (source-loot-box-id uint))
+  (map-get? fusion-recipes { source-loot-box-id: source-loot-box-id })
+)
+
+(define-read-only (get-player-fusion-stats (player principal))
+  (default-to
+    { total-fusions: u0, boxes-fused: u0 }
+    (map-get? player-fusion-stats { player: player })
+  )
+)
+
+(define-read-only (get-total-fusions-completed)
+  (var-get total-fusions-completed)
 )
 
 (define-private (generate-pseudo-random (player principal) (nonce uint))
@@ -566,5 +602,105 @@
       (box-price (get price loot-box-data))
     )
     (ok (/ box-price u1000))
+  )
+)
+
+(define-public (create-fusion-recipe (source-loot-box-id uint) (target-loot-box-id uint) (required-quantity uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-some (get-loot-box source-loot-box-id)) err-invalid-loot-box)
+    (asserts! (is-some (get-loot-box target-loot-box-id)) err-invalid-loot-box)
+    (map-set fusion-recipes
+      { source-loot-box-id: source-loot-box-id }
+      {
+        target-loot-box-id: target-loot-box-id,
+        required-quantity: required-quantity,
+        enabled: true
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-public (toggle-fusion-recipe (source-loot-box-id uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (let
+      (
+        (recipe-data (unwrap! (get-fusion-recipe source-loot-box-id) err-invalid-fusion-recipe))
+        (current-enabled (get enabled recipe-data))
+      )
+      (map-set fusion-recipes
+        { source-loot-box-id: source-loot-box-id }
+        (merge recipe-data { enabled: (not current-enabled) })
+      )
+      (ok (not current-enabled))
+    )
+  )
+)
+
+(define-public (fuse-loot-boxes (source-loot-box-id uint))
+  (let
+    (
+      (recipe-data (unwrap! (get-fusion-recipe source-loot-box-id) err-invalid-fusion-recipe))
+      (target-box-id (get target-loot-box-id recipe-data))
+      (required-qty (get required-quantity recipe-data))
+      (recipe-enabled (get enabled recipe-data))
+      (player-purchases (default-to u0 (get quantity (map-get? loot-box-purchases { player: tx-sender, loot-box-id: source-loot-box-id }))))
+      (target-box-data (unwrap! (get-loot-box target-box-id) err-invalid-loot-box))
+      (fusion-stats (get-player-fusion-stats tx-sender))
+      (current-total-fusions (get total-fusions fusion-stats))
+      (current-boxes-fused (get boxes-fused fusion-stats))
+    )
+    (asserts! recipe-enabled err-fusion-not-enabled)
+    (asserts! (>= player-purchases required-qty) err-insufficient-boxes-for-fusion)
+    (asserts! (> (get current-supply target-box-data) u0) err-loot-box-not-available)
+    (map-set loot-box-purchases
+      { player: tx-sender, loot-box-id: source-loot-box-id }
+      { quantity: (- player-purchases required-qty) }
+    )
+    (let
+      (
+        (target-purchases (default-to u0 (get quantity (map-get? loot-box-purchases { player: tx-sender, loot-box-id: target-box-id }))))
+      )
+      (map-set loot-box-purchases
+        { player: tx-sender, loot-box-id: target-box-id }
+        { quantity: (+ target-purchases u1) }
+      )
+    )
+    (map-set loot-boxes
+      { loot-box-id: target-box-id }
+      (merge target-box-data { current-supply: (- (get current-supply target-box-data) u1) })
+    )
+    (map-set player-fusion-stats
+      { player: tx-sender }
+      {
+        total-fusions: (+ current-total-fusions u1),
+        boxes-fused: (+ current-boxes-fused required-qty)
+      }
+    )
+    (var-set total-fusions-completed (+ (var-get total-fusions-completed) u1))
+    (ok { fused-boxes: required-qty, received-box-id: target-box-id })
+  )
+)
+
+(define-read-only (can-fuse (player principal) (source-loot-box-id uint))
+  (let
+    (
+      (recipe-data (unwrap! (get-fusion-recipe source-loot-box-id) err-invalid-fusion-recipe))
+      (required-qty (get required-quantity recipe-data))
+      (recipe-enabled (get enabled recipe-data))
+      (player-purchases (default-to u0 (get quantity (map-get? loot-box-purchases { player: player, loot-box-id: source-loot-box-id }))))
+    )
+    (ok (and recipe-enabled (>= player-purchases required-qty)))
+  )
+)
+
+(define-public (initialize-fusion-recipes)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (try! (create-fusion-recipe u1 u2 u3))
+    (try! (create-fusion-recipe u2 u3 u3))
+    (ok true)
   )
 )
