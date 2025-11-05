@@ -11,6 +11,7 @@
 (define-constant err-invalid-fusion-recipe (err u110))
 (define-constant err-insufficient-boxes-for-fusion (err u111))
 (define-constant err-fusion-not-enabled (err u112))
+(define-constant err-invalid-craft-cost (err u113))
 
 (define-data-var loot-box-counter uint u0)
 (define-data-var reward-counter uint u0)
@@ -702,5 +703,53 @@
     (try! (create-fusion-recipe u1 u2 u3))
     (try! (create-fusion-recipe u2 u3 u3))
     (ok true)
+  )
+)
+
+(define-map craft-costs
+  { reward-id: uint }
+  { points: uint }
+)
+
+(define-read-only (get-craft-cost (reward-id uint))
+  (default-to
+    { points: u0 }
+    (map-get? craft-costs { reward-id: reward-id })
+  )
+)
+
+(define-public (set-craft-cost (reward-id uint) (points uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (map-set craft-costs
+      { reward-id: reward-id }
+      { points: points }
+    )
+    (ok true)
+  )
+)
+
+(define-public (craft-reward-with-points (reward-id uint))
+  (let
+    (
+      (reward-data (unwrap! (get-reward reward-id) err-invalid-reward))
+      (cost-data (get-craft-cost reward-id))
+      (cost (get points cost-data))
+      (burn-points-data (get-player-burn-points tx-sender))
+      (current-points (get points burn-points-data))
+      (current-inventory (get-player-inventory tx-sender reward-id))
+      (current-quantity (get quantity current-inventory))
+    )
+    (asserts! (> cost u0) err-invalid-craft-cost)
+    (asserts! (>= current-points cost) err-insufficient-burn-points)
+    (map-set player-burn-points
+      { player: tx-sender }
+      { points: (- current-points cost) }
+    )
+    (map-set player-inventory
+      { player: tx-sender, reward-id: reward-id }
+      { quantity: (+ current-quantity u1) }
+    )
+    (ok { reward-id: reward-id, points-spent: cost })
   )
 )
