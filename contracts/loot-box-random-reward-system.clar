@@ -12,12 +12,14 @@
 (define-constant err-insufficient-boxes-for-fusion (err u111))
 (define-constant err-fusion-not-enabled (err u112))
 (define-constant err-invalid-craft-cost (err u113))
+(define-constant err-contract-paused (err u115))
 
 (define-data-var loot-box-counter uint u0)
 (define-data-var reward-counter uint u0)
 (define-data-var total-boxes-opened uint u0)
 (define-data-var total-rewards-burned uint u0)
 (define-data-var total-fusions-completed uint u0)
+(define-data-var contract-paused bool false)
 
 (define-map loot-boxes
   { loot-box-id: uint }
@@ -153,6 +155,18 @@
   (var-get total-fusions-completed)
 )
 
+(define-read-only (get-contract-paused)
+  (var-get contract-paused)
+)
+
+(define-public (set-contract-paused (paused bool))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set contract-paused paused)
+    (ok paused)
+  )
+)
+
 (define-private (generate-pseudo-random (player principal) (nonce uint))
   (+ 
     (+ stacks-block-height nonce)
@@ -283,6 +297,7 @@
       (box-price (get price loot-box-data))
       (current-supply (get current-supply loot-box-data))
     )
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (get available loot-box-data) err-loot-box-not-available)
     (asserts! (> current-supply u0) err-loot-box-not-available)
     (try! (stx-transfer? box-price tx-sender contract-owner))
@@ -310,6 +325,7 @@
       (player-purchases (default-to u0 (get quantity (map-get? loot-box-purchases { player: tx-sender, loot-box-id: loot-box-id }))))
       (box-price (get price loot-box-data))
     )
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (> player-purchases u0) err-insufficient-balance)
     (let
       (
@@ -339,6 +355,7 @@
       (recipient-inventory (get-player-inventory recipient reward-id))
       (recipient-quantity (get quantity recipient-inventory))
     )
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (>= sender-quantity quantity) err-reward-not-owned)
     (map-set player-inventory
       { player: tx-sender, reward-id: reward-id }
@@ -454,6 +471,7 @@
 
 (define-public (batch-open-loot-boxes (loot-box-id uint) (quantity uint))
   (begin
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (<= quantity u10) (err u109))
     (ok (fold batch-open-helper (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) { loot-box-id: loot-box-id, remaining: quantity, results: (list) }))
   )
@@ -535,6 +553,7 @@
       (current-burn-points (get-player-burn-points tx-sender))
       (current-points (get points current-burn-points))
     )
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (> quantity u0) err-zero-quantity)
     (asserts! (>= current-quantity quantity) err-reward-not-owned)
     (asserts! (> points-per-item u0) err-invalid-burn-quantity)
@@ -560,6 +579,7 @@
       (box-price (get price loot-box-data))
       (required-points (/ box-price u1000))
     )
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (get available loot-box-data) err-loot-box-not-available)
     (asserts! (> (get current-supply loot-box-data) u0) err-loot-box-not-available)
     (asserts! (>= points-to-spend required-points) err-insufficient-burn-points)
@@ -653,6 +673,7 @@
       (current-total-fusions (get total-fusions fusion-stats))
       (current-boxes-fused (get boxes-fused fusion-stats))
     )
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! recipe-enabled err-fusion-not-enabled)
     (asserts! (>= player-purchases required-qty) err-insufficient-boxes-for-fusion)
     (asserts! (> (get current-supply target-box-data) u0) err-loot-box-not-available)
@@ -740,6 +761,7 @@
       (current-inventory (get-player-inventory tx-sender reward-id))
       (current-quantity (get quantity current-inventory))
     )
+    (asserts! (not (var-get contract-paused)) err-contract-paused)
     (asserts! (> cost u0) err-invalid-craft-cost)
     (asserts! (>= current-points cost) err-insufficient-burn-points)
     (map-set player-burn-points
