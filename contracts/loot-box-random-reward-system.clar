@@ -775,3 +775,77 @@
     (ok { reward-id: reward-id, points-spent: cost })
   )
 )
+
+;; --------------------------------------------------------------------------
+;; MARKETPLACE FEATURE
+;; --------------------------------------------------------------------------
+
+(define-constant err-invalid-price (err u116))
+(define-constant err-listing-not-found (err u117))
+(define-constant err-insufficient-listing-quantity (err u118))
+(define-constant err-cannot-buy-own-listing (err u119))
+
+(define-map market-listings
+  { seller: principal, reward-id: uint }
+  { price: uint, quantity: uint }
+)
+
+(define-read-only (get-listing (seller principal) (reward-id uint))
+  (map-get? market-listings { seller: seller, reward-id: reward-id })
+)
+
+(define-public (list-reward (reward-id uint) (price uint) (quantity uint))
+  (let
+    (
+      (listing-key { seller: tx-sender, reward-id: reward-id })
+      (current-listing (default-to { price: u0, quantity: u0 } (map-get? market-listings listing-key)))
+      (new-quantity (+ (get quantity current-listing) quantity))
+    )
+    (asserts! (> price u0) err-invalid-price)
+    (asserts! (> quantity u0) err-zero-quantity)
+    (try! (transfer-reward (as-contract tx-sender) reward-id quantity))
+    (map-set market-listings
+      listing-key
+      { price: price, quantity: new-quantity }
+    )
+    (ok true)
+  )
+)
+
+(define-public (cancel-listing (reward-id uint))
+  (let
+    (
+      (listing-key { seller: tx-sender, reward-id: reward-id })
+      (listing (unwrap! (map-get? market-listings listing-key) err-listing-not-found))
+      (refund-quantity (get quantity listing))
+      (seller tx-sender)
+    )
+    (map-delete market-listings listing-key)
+    (as-contract (transfer-reward seller reward-id refund-quantity))
+  )
+)
+
+(define-public (buy-reward (seller principal) (reward-id uint) (quantity uint))
+  (let
+    (
+      (listing-key { seller: seller, reward-id: reward-id })
+      (listing (unwrap! (map-get? market-listings listing-key) err-listing-not-found))
+      (listing-price (get price listing))
+      (listing-quantity (get quantity listing))
+      (total-cost (* listing-price quantity))
+      (buyer tx-sender)
+    )
+    (asserts! (not (is-eq buyer seller)) err-cannot-buy-own-listing)
+    (asserts! (<= quantity listing-quantity) err-insufficient-listing-quantity)
+    (try! (stx-transfer? total-cost buyer seller))
+    (try! (as-contract (transfer-reward buyer reward-id quantity)))
+    (if (is-eq quantity listing-quantity)
+      (map-delete market-listings listing-key)
+      (map-set market-listings
+        listing-key
+        { price: listing-price, quantity: (- listing-quantity quantity) }
+      )
+    )
+    (ok true)
+  )
+)
